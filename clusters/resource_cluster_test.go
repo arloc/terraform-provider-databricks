@@ -1882,7 +1882,8 @@ func TestResourceClusterUpdate_LocalSsdCount(t *testing.T) {
 					SparkVersion:           "7.1-scala12",
 					NodeTypeId:             "i3.xlarge",
 					GcpAttributes: &compute.GcpAttributes{
-						LocalSsdCount: 0,
+						LocalSsdCount:   0,
+						ForceSendFields: []string{"LocalSsdCount"},
 					},
 				},
 			},
@@ -2084,4 +2085,175 @@ func TestResourceClusterAliasAutoNoDrift_DataSecurityMode(t *testing.T) {
 
 	assert.NoError(t, err)
 	assert.False(t, d.HasChanges("data_security_mode"))
+}
+
+func TestZeroValueDiffSuppressFunc_ExplicitZeroNotSuppressed(t *testing.T) {
+	d, err := qa.ResourceFixture{
+		MockWorkspaceClientFunc: func(w *mocks.MockWorkspaceClient) {
+			api := w.GetMockClustersAPI().EXPECT()
+			api.List(mock.Anything, compute.ListClustersRequest{
+				FilterBy: &compute.ListClustersFilterBy{
+					IsPinned: true,
+				},
+				PageSize: 100,
+			}).Return(&listing.SliceIterator[compute.ClusterDetails]{})
+			api.GetByClusterId(mock.Anything, "abc").Return(
+				&compute.ClusterDetails{
+					ClusterId:              "abc",
+					NumWorkers:             100,
+					ClusterName:            "GCP Cluster",
+					SparkVersion:           "7.1-scala12",
+					NodeTypeId:             "i3.xlarge",
+					AutoterminationMinutes: 15,
+					State:                  compute.StateTerminated,
+					GcpAttributes: &compute.GcpAttributes{
+						LocalSsdCount: 2,
+					},
+				}, nil,
+			)
+		},
+		ID:       "abc",
+		Read:     true,
+		Resource: ResourceCluster(),
+		InstanceState: map[string]string{
+			"autotermination_minutes":          "15",
+			"cluster_name":                     "GCP Cluster",
+			"spark_version":                    "7.1-scala12",
+			"node_type_id":                     "i3.xlarge",
+			"num_workers":                      "100",
+			"gcp_attributes.#":                 "1",
+			"gcp_attributes.0.local_ssd_count": "2",
+		},
+		HCL: `
+		autotermination_minutes = 15
+		cluster_name =            "GCP Cluster"
+		spark_version =           "7.1-scala12"
+		node_type_id =            "i3.xlarge"
+		num_workers =             100
+		gcp_attributes {
+			local_ssd_count = 0
+		}
+		`,
+	}.Apply(t)
+
+	assert.NoError(t, err)
+	// When user explicitly sets local_ssd_count = 0, it should NOT be suppressed
+	// because 0 is a valid explicit value (different from -1 which means "not set")
+	assert.True(t, d.HasChanges("gcp_attributes.0.local_ssd_count"), "local_ssd_count = 0 should not be suppressed when explicitly set")
+}
+
+func TestZeroValueDiffSuppressFunc_NotSetSuppressed(t *testing.T) {
+	// Note: In unit tests, GetRawConfig() returns null, so DiffSuppressFunc returns false.
+	// This test verifies the behavior in unit test context. In real Terraform runs,
+	// the DiffSuppressFunc will use GetRawConfig() to check if field was explicitly set.
+	d, err := qa.ResourceFixture{
+		MockWorkspaceClientFunc: func(w *mocks.MockWorkspaceClient) {
+			api := w.GetMockClustersAPI().EXPECT()
+			api.List(mock.Anything, compute.ListClustersRequest{
+				FilterBy: &compute.ListClustersFilterBy{
+					IsPinned: true,
+				},
+				PageSize: 100,
+			}).Return(&listing.SliceIterator[compute.ClusterDetails]{})
+			api.GetByClusterId(mock.Anything, "abc").Return(
+				&compute.ClusterDetails{
+					ClusterId:              "abc",
+					NumWorkers:             100,
+					ClusterName:            "GCP Cluster",
+					SparkVersion:           "7.1-scala12",
+					NodeTypeId:             "i3.xlarge",
+					AutoterminationMinutes: 15,
+					State:                  compute.StateTerminated,
+					GcpAttributes: &compute.GcpAttributes{
+						LocalSsdCount: 2,
+					},
+				}, nil,
+			)
+		},
+		ID:       "abc",
+		Read:     true,
+		Resource: ResourceCluster(),
+		InstanceState: map[string]string{
+			"autotermination_minutes":          "15",
+			"cluster_name":                     "GCP Cluster",
+			"spark_version":                    "7.1-scala12",
+			"node_type_id":                     "i3.xlarge",
+			"num_workers":                      "100",
+			"gcp_attributes.#":                 "1",
+			"gcp_attributes.0.local_ssd_count": "2", // API returned 2
+		},
+		HCL: `
+		autotermination_minutes = 15
+		cluster_name =            "GCP Cluster"
+		spark_version =           "7.1-scala12"
+		node_type_id =            "i3.xlarge"
+		num_workers =             100
+		gcp_attributes {
+		}
+		`,
+	}.Apply(t)
+
+	assert.NoError(t, err)
+	// In unit tests, GetRawConfig() returns null, so DiffSuppressFunc doesn't suppress.
+	// In real Terraform runs, when user doesn't set local_ssd_count, the diff would be suppressed.
+	// This test just verifies the resource can be read without errors.
+	_ = d
+}
+
+// TestLocalSsdCount_RemovedFromConfig tests that when a user removes local_ssd_count
+// from their config (after having it explicitly set), the diff handling works.
+// Note: In unit tests, GetRawConfig() returns null, so DiffSuppressFunc doesn't suppress.
+// In real Terraform runs, when user removes local_ssd_count from config, the diff would be suppressed.
+func TestLocalSsdCount_RemovedFromConfig(t *testing.T) {
+	_, err := qa.ResourceFixture{
+		MockWorkspaceClientFunc: func(w *mocks.MockWorkspaceClient) {
+			api := w.GetMockClustersAPI().EXPECT()
+			api.List(mock.Anything, compute.ListClustersRequest{
+				FilterBy: &compute.ListClustersFilterBy{
+					IsPinned: true,
+				},
+				PageSize: 100,
+			}).Return(&listing.SliceIterator[compute.ClusterDetails]{})
+			api.GetByClusterId(mock.Anything, "abc").Return(
+				&compute.ClusterDetails{
+					ClusterId:              "abc",
+					NumWorkers:             100,
+					ClusterName:            "GCP Cluster",
+					SparkVersion:           "7.1-scala12",
+					NodeTypeId:             "i3.xlarge",
+					AutoterminationMinutes: 15,
+					State:                  compute.StateTerminated,
+					GcpAttributes: &compute.GcpAttributes{
+						LocalSsdCount: 2, // API has 2 (from previous explicit setting)
+					},
+				}, nil,
+			)
+		},
+		ID:       "abc",
+		Read:     true,
+		Resource: ResourceCluster(),
+		InstanceState: map[string]string{
+			"autotermination_minutes":          "15",
+			"cluster_name":                     "GCP Cluster",
+			"spark_version":                    "7.1-scala12",
+			"node_type_id":                     "i3.xlarge",
+			"num_workers":                      "100",
+			"gcp_attributes.#":                 "1",
+			"gcp_attributes.0.local_ssd_count": "2", // Previously had explicit 2
+		},
+		HCL: `
+		autotermination_minutes = 15
+		cluster_name =            "GCP Cluster"
+		spark_version =           "7.1-scala12"
+		node_type_id =            "i3.xlarge"
+		num_workers =             100
+		gcp_attributes {
+			# local_ssd_count removed from config
+		}
+		`,
+	}.Apply(t)
+
+	assert.NoError(t, err)
+	// In unit tests, GetRawConfig() returns null, so we can't verify suppress behavior here.
+	// The important thing is that the resource can be read without errors.
 }

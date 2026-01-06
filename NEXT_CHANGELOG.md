@@ -8,6 +8,7 @@
 
 ### Bug Fixes
 
+* Fixed `databricks_cluster` resource ignoring explicit `gcp_attributes.local_ssd_count = 0`
 ### Documentation
 
 ### Exporter

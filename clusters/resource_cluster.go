@@ -360,7 +360,46 @@ func (ClusterSpec) CustomizeSchema(s *common.CustomizableSchema) *common.Customi
 	s.SchemaPath("spark_conf").SetCustomSuppressDiff(SparkConfDiffSuppressFunc)
 	s.SchemaPath("aws_attributes").SetSuppressDiff().SetConflictsWith([]string{"azure_attributes", "gcp_attributes"})
 	s.SchemaPath("azure_attributes").SetSuppressDiff().SetConflictsWith([]string{"aws_attributes", "gcp_attributes"})
-	s.SchemaPath("gcp_attributes").SetSuppressDiff().SetConflictsWith([]string{"aws_attributes", "azure_attributes"})
+	// Note: NOT calling SetSuppressDiff() on gcp_attributes because it would override
+	// the custom DiffSuppressFunc we set on local_ssd_count below. Instead, we apply
+	// SetSuppressDiff() to individual fields within gcp_attributes.
+	s.SchemaPath("gcp_attributes").SetConflictsWith([]string{"aws_attributes", "azure_attributes"})
+	s.SchemaPath("gcp_attributes", "use_preemptible_executors").SetSuppressDiff()
+	s.SchemaPath("gcp_attributes", "google_service_account").SetSuppressDiff()
+	s.SchemaPath("gcp_attributes", "availability").SetSuppressDiff()
+	s.SchemaPath("gcp_attributes", "boot_disk_size").SetSuppressDiff()
+	s.SchemaPath("gcp_attributes", "first_on_demand").SetSuppressDiff()
+	s.SchemaPath("gcp_attributes", "zone_id").SetSuppressDiff()
+	// Mark local_ssd_count as Computed so it doesn't show ugly default values in plan.
+	// The custom DiffSuppressFunc handles the "not set" vs "explicitly 0" distinction.
+	s.SchemaPath("gcp_attributes", "local_ssd_count").SetComputed().SetCustomSuppressDiff(
+		func(k, old, new string, d *schema.ResourceData) bool {
+			// Suppress diff only when the field is not explicitly set in config.
+			// Use GetRawConfig to check if the field was explicitly set.
+			rawConfig := d.GetRawConfig()
+			if rawConfig.IsNull() || !rawConfig.IsKnown() {
+				// No raw config available (e.g., during import or unit tests).
+				// In unit tests, we can't reliably determine if field was explicitly set,
+				// so don't suppress any diff to be safe.
+				return false
+			}
+			gcpAttrsVal := rawConfig.GetAttr("gcp_attributes")
+			if gcpAttrsVal.IsNull() || !gcpAttrsVal.IsKnown() || gcpAttrsVal.LengthInt() == 0 {
+				// gcp_attributes not set, suppress any diff for local_ssd_count
+				return true
+			}
+			gcpAttr := gcpAttrsVal.Index(cty.NumberIntVal(0))
+			if gcpAttr.IsNull() || !gcpAttr.IsKnown() {
+				return true
+			}
+			localSsdVal := gcpAttr.GetAttr("local_ssd_count")
+			if localSsdVal.IsNull() || !localSsdVal.IsKnown() {
+				// local_ssd_count not explicitly set in config, suppress diff
+				return true
+			}
+			// Field is explicitly set in config, don't suppress diff
+			return false
+		})
 	s.SchemaPath("autoscale", "max_workers").SetOptional()
 	s.SchemaPath("autoscale", "min_workers").SetOptional()
 	s.SchemaPath("cluster_log_conf", "dbfs", "destination").SetRequired()
@@ -404,9 +443,32 @@ func resourceClusterCreate(ctx context.Context, d *schema.ResourceData, c *commo
 		return err
 	}
 	SetForceSendFieldsForCluster(&createClusterRequest, d)
+	// Handle local_ssd_count: check raw config to distinguish "not set" from "explicitly set to 0"
 	if createClusterRequest.GcpAttributes != nil {
-		if _, ok := d.GetOkExists("gcp_attributes.0.local_ssd_count"); ok {
-			createClusterRequest.GcpAttributes.ForceSendFields = []string{"LocalSsdCount"}
+		// Use GetRawConfig to check if local_ssd_count was explicitly set in the config
+		rawConfig := d.GetRawConfig()
+		localSsdExplicitlySet := false
+		if !rawConfig.IsNull() && rawConfig.IsKnown() {
+			gcpAttrsVal := rawConfig.GetAttr("gcp_attributes")
+			if !gcpAttrsVal.IsNull() && gcpAttrsVal.IsKnown() && gcpAttrsVal.LengthInt() > 0 {
+				gcpAttr := gcpAttrsVal.Index(cty.NumberIntVal(0))
+				if !gcpAttr.IsNull() && gcpAttr.IsKnown() {
+					localSsdVal := gcpAttr.GetAttr("local_ssd_count")
+					localSsdExplicitlySet = !localSsdVal.IsNull() && localSsdVal.IsKnown()
+				}
+			}
+		}
+		if localSsdExplicitlySet {
+			// Field is explicitly set in config, get the value from raw config and force send to API
+			gcpAttrsVal := rawConfig.GetAttr("gcp_attributes")
+			gcpAttr := gcpAttrsVal.Index(cty.NumberIntVal(0))
+			localSsdVal := gcpAttr.GetAttr("local_ssd_count")
+			localSsdCount, _ := localSsdVal.AsBigFloat().Int64()
+			createClusterRequest.GcpAttributes.LocalSsdCount = int(localSsdCount)
+			createClusterRequest.GcpAttributes.ForceSendFields = append(createClusterRequest.GcpAttributes.ForceSendFields, "LocalSsdCount")
+		} else {
+			// Not explicitly set - reset to 0 so old state value isn't sent
+			createClusterRequest.GcpAttributes.LocalSsdCount = 0
 		}
 	}
 	clusterWaiter, err := clusters.Create(ctx, createClusterRequest)
@@ -494,9 +556,11 @@ func resourceClusterRead(ctx context.Context, d *schema.ResourceData, c *common.
 	if err != nil {
 		return wrapMissingClusterError(err, d.Id())
 	}
+
 	if err = common.StructToData(clusterInfo, clusterSchema, d); err != nil {
 		return err
 	}
+
 	if err = setPinnedStatus(ctx, d, clusterAPI); err != nil {
 		return err
 	}
@@ -620,6 +684,34 @@ func resourceClusterUpdate(ctx context.Context, d *schema.ResourceData, c *commo
 			})
 		} else {
 			SetForceSendFieldsForCluster(&cluster, d)
+			// Handle local_ssd_count: check raw config to distinguish "not set" from "explicitly set to 0"
+			if cluster.GcpAttributes != nil {
+				// Use GetRawConfig to check if local_ssd_count was explicitly set in the config
+				rawConfig := d.GetRawConfig()
+				localSsdExplicitlySet := false
+				if !rawConfig.IsNull() && rawConfig.IsKnown() {
+					gcpAttrsVal := rawConfig.GetAttr("gcp_attributes")
+					if !gcpAttrsVal.IsNull() && gcpAttrsVal.IsKnown() && gcpAttrsVal.LengthInt() > 0 {
+						gcpAttr := gcpAttrsVal.Index(cty.NumberIntVal(0))
+						if !gcpAttr.IsNull() && gcpAttr.IsKnown() {
+							localSsdVal := gcpAttr.GetAttr("local_ssd_count")
+							localSsdExplicitlySet = !localSsdVal.IsNull() && localSsdVal.IsKnown()
+						}
+					}
+				}
+				if localSsdExplicitlySet {
+					// Field is explicitly set in config, get the value from raw config and force send to API
+					gcpAttrsVal := rawConfig.GetAttr("gcp_attributes")
+					gcpAttr := gcpAttrsVal.Index(cty.NumberIntVal(0))
+					localSsdVal := gcpAttr.GetAttr("local_ssd_count")
+					localSsdCount, _ := localSsdVal.AsBigFloat().Int64()
+					cluster.GcpAttributes.LocalSsdCount = int(localSsdCount)
+					cluster.GcpAttributes.ForceSendFields = append(cluster.GcpAttributes.ForceSendFields, "LocalSsdCount")
+				} else {
+					// Not explicitly set - reset to 0 so old state value isn't sent
+					cluster.GcpAttributes.LocalSsdCount = 0
+				}
+			}
 
 			err = retry.RetryContext(ctx, 15*time.Minute, func() *retry.RetryError {
 				_, err = clusters.Edit(ctx, cluster)

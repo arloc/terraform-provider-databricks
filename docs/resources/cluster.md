@@ -431,7 +431,7 @@ The following options are available:
 * `first_on_demand` - (Optional) The first `first_on_demand` nodes of the cluster will be placed on on-demand instances. If this value is greater than 0, the cluster driver node will be placed on an on-demand instance. If this value is greater than or equal to the current cluster size, all nodes will be placed on on-demand instances. If this value is less than the current cluster size, `first_on_demand` nodes will be placed on on-demand instances, and the remainder will be placed on availability instances. This value does not affect cluster size and cannot be mutated over the lifetime of a cluster.
 * `availability` - (Optional) Availability type used for all nodes. Valid values are `PREEMPTIBLE_GCP`, `PREEMPTIBLE_WITH_FALLBACK_GCP` and `ON_DEMAND_GCP`, default: `ON_DEMAND_GCP`.
 * `boot_disk_size` (optional, int) Boot disk size in GB
-* `local_ssd_count` (optional, int) Number of local SSD disks (each is 375GB in size) that will be attached to each node of the cluster.
+* `local_ssd_count` (optional, int) Number of local SSD disks (each is 375GB in size) that will be attached to each node of the cluster. When explicitly set to `0`, ensures no local SSDs are attached. When omitted, the API default is used.
 * `zone_id` (optional)  Identifier for the availability zone in which the cluster resides. This can be one of the following:
   * `HA` (default): High availability, spread nodes across availability zones for a Databricks deployment region.
   * `AUTO`: Databricks picks an availability zone to schedule the cluster on.
